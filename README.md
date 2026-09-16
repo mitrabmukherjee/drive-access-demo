@@ -1,36 +1,59 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://github.com/vercel/next.js/tree/canary/packages/create-next-app).
+# Drive access demo
 
-## Getting Started
+Standalone Next.js demo: every user grants **Google Drive** on login. When you assign a colleague to a file you own, the app calls Drive `permissions.create` **as you** and shares that file with their `@steorasystems.com` address.
 
-First, run the development server:
+This is not the CRM. It uses a local Postgres database named `drive_access_demo` (not the CRM DB).
+
+## Prerequisites
+
+1. GCP project **drive-access-demo** with **Google Drive API** enabled.
+2. OAuth consent screen **Internal**, scopes:
+   - `openid`
+   - `email`
+   - `profile`
+   - `https://www.googleapis.com/auth/drive`
+3. OAuth **Web** client:
+   - Authorized JavaScript origins: `http://localhost:3000`
+   - Authorized redirect URI: `http://localhost:3000/api/auth/callback/google`
+4. Two `@steorasystems.com` accounts.
+5. A Drive file owned by user A, sharing set to **Restricted** (not anyone-with-the-link).
+
+## Setup
 
 ```bash
+cd C:\Users\Steora\drive-access-demo
+npm install
+npx prisma migrate deploy
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Stop `npm run dev` before `npx prisma generate` on Windows, or Prisma hits `EPERM` renaming `query_engine-windows.dll.node`. `migrate deploy` applies SQL without that generate step. After stopping the server you can run `npx prisma generate` if the client is stale.
 
-You can start editing the page by modifying `app/page.js`. The page auto-updates as you edit the file.
+Open [http://localhost:3000](http://localhost:3000). The Google OAuth client is registered for that origin. If something else is already using port 3000, stop it first — Next.js must not fall back to another port or sign-in will fail.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Copy `.env.example` to `.env` / `.env.local` if needed:
 
-## Learn More
+```
+AUTH_GOOGLE_ID=
+AUTH_GOOGLE_SECRET=
+AUTH_SECRET=
+AUTH_URL=http://localhost:3000
+DATABASE_URL="postgresql://postgres:PASSWORD@localhost:5432/drive_access_demo"
+```
 
-To learn more about Next.js, take a look at the following resources:
+Do not commit `.env` or `.env.local`.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Test with two users
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+1. User A signs in and accepts Drive access.
+2. User A pastes the Restricted file URL and clicks **Add file**.
+3. User A assigns User B as Viewer (or Editor).
+4. Incognito as User B: the Drive link should open (it should have been “request access” before assign). User B can also sign into this demo and see the file under **Assigned to me** without refreshing (live SSE).
+5. User A clicks **Unassign**. User B should lose access (new tab / short delay) and the demo list should drop the file live.
 
-## Deploy on Vercel
+## Limits
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- Sharing only works if the signed-in owner can share that file in Drive.
+- If the user removes the app in Google Account, the refresh token dies — they must sign in again.
+- Refresh tokens live in Postgres. Fine for a demo; treat production credentials as secrets.
+- Live assign/unassign uses Postgres-backed SSE, so it works across Vercel instances that share `DATABASE_URL`.
