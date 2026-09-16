@@ -1,8 +1,8 @@
 # Drive access demo
 
-Standalone Next.js demo: every user grants **Google Drive** on login. When you assign a colleague to a file you own, the app calls Drive `permissions.create` **as you** and shares that file with their `@steorasystems.com` address.
+Standalone Next.js demo: every user grants **Google Drive** on login. Upload a file; it is saved in **your** Drive (folder `Drive Access Demo`). When you assign a colleague, the app calls Drive `permissions.create` **as you** and shares that file with their `@steorasystems.com` address.
 
-This is not the CRM. It uses a local Postgres database named `drive_access_demo` (not the CRM DB).
+This is not the CRM. It uses Postgres (local and/or Neon).
 
 ## Prerequisites
 
@@ -13,10 +13,11 @@ This is not the CRM. It uses a local Postgres database named `drive_access_demo`
    - `profile`
    - `https://www.googleapis.com/auth/drive`
 3. OAuth **Web** client:
-   - Authorized JavaScript origins: `http://localhost:3000`
-   - Authorized redirect URI: `http://localhost:3000/api/auth/callback/google`
+   - Authorized JavaScript origins: `http://localhost:3000` and `https://drive-access-demo.vercel.app` (required for browser → Drive upload)
+   - Authorized redirect URI: `http://localhost:3000/api/auth/callback/google` and `https://drive-access-demo.vercel.app/api/auth/callback/google`
 4. Two `@steorasystems.com` accounts.
-5. A Drive file owned by user A, sharing set to **Restricted** (not anyone-with-the-link).
+
+The file is uploaded from the browser straight to Google Drive (not through Vercel), so large files are fine. JavaScript origins must match the page origin or the resumable upload will fail in CORS.
 
 ## Setup
 
@@ -46,9 +47,9 @@ Do not commit `.env` or `.env.local`.
 ## Test with two users
 
 1. User A signs in and accepts Drive access.
-2. User A pastes the Restricted file URL and clicks **Add file**.
+2. User A uploads a file. It appears in their Drive under **Drive Access Demo**, and in **Files I own**.
 3. User A assigns User B as Viewer (or Editor).
-4. Incognito as User B: the Drive link should open (it should have been “request access” before assign). User B can also sign into this demo and see the file under **Assigned to me** without refreshing (live SSE).
+4. Incognito as User B: the Drive link should open. User B can also sign into this demo and see the file under **Assigned to me** without refreshing (live SSE).
 5. User A clicks **Unassign**. User B should lose access (new tab / short delay) and the demo list should drop the file live.
 
 ## Limits

@@ -87,10 +87,10 @@ export async function POST(request) {
   }
 
   const url = String(body?.url ?? "").trim();
-  const driveFileId = parseDriveFileId(url);
+  const driveFileId = String(body?.driveFileId ?? "").trim() || parseDriveFileId(url);
   if (!driveFileId) {
     return NextResponse.json(
-      { error: "Paste a Google Drive or Docs URL." },
+      { error: "Upload a file or provide a Google Drive file id." },
       { status: 400 },
     );
   }
@@ -113,7 +113,7 @@ export async function POST(request) {
       );
     }
 
-    const storedUrl = meta.data.webViewLink || url;
+    const storedUrl = meta.data.webViewLink || url || `https://drive.google.com/file/d/${driveFileId}/view`;
     const title = meta.data.name || driveFileId;
 
     const file = await db.driveFile.upsert({

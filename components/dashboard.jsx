@@ -30,24 +30,77 @@ function roleLabel(role) {
   return role === "writer" ? "Editor" : "Viewer";
 }
 
+async function uploadFileToDrive(file, accessToken, folderId) {
+  const start = await fetch(
+    "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,name,webViewLink",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json; charset=UTF-8",
+        "X-Upload-Content-Type": file.type || "application/octet-stream",
+        "X-Upload-Content-Length": String(file.size),
+      },
+      body: JSON.stringify({
+        name: file.name,
+        parents: [folderId],
+      }),
+    },
+  );
+  if (!start.ok) {
+    throw new Error("Could not start Google Drive upload. Check OAuth JavaScript origins.");
+  }
+  const sessionUrl = start.headers.get("Location");
+  if (!sessionUrl) {
+    throw new Error("Drive did not return an upload session URL.");
+  }
+
+  const put = await fetch(sessionUrl, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": file.type || "application/octet-stream",
+    },
+    body: file,
+  });
+  if (!put.ok) {
+    throw new Error("Google Drive upload failed.");
+  }
+  const meta = await put.json();
+  if (!meta?.id) {
+    throw new Error("Drive upload returned no file id.");
+  }
+  return meta.id;
+}
+
 export default function Dashboard({ user }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
   const [live, setLive] = useState("connecting");
-  const [url, setUrl] = useState("");
+  const [picked, setPicked] = useState(null);
   const [adding, setAdding] = useState(false);
   const [assignDraft, setAssignDraft] = useState({});
   const [busyId, setBusyId] = useState("");
+  const [users, setUsers] = useState([]);
+  const [confirmDelete, setConfirmDelete] = useState(null);
+  const [deleting, setDeleting] = useState(false);
 
   const load = useCallback(async () => {
     setError("");
-    const res = await fetch("/api/files");
-    const json = await res.json();
-    if (!res.ok) {
-      setError(json.error || "Failed to load files");
+    const [filesRes, usersRes] = await Promise.all([
+      fetch("/api/files"),
+      fetch("/api/users"),
+    ]);
+    const filesJson = await filesRes.json();
+    if (!filesRes.ok) {
+      setError(filesJson.error || "Failed to load files");
       return;
     }
-    setData(json);
+    setData(filesJson);
+    if (usersRes.ok) {
+      const usersJson = await usersRes.json();
+      setUsers(usersJson.users ?? []);
+    }
   }, []);
 
   useEffect(() => {
@@ -74,17 +127,32 @@ export default function Dashboard({ user }) {
 
   async function addFile(e) {
     e.preventDefault();
+    if (!picked) {
+      setError("Choose a file to upload.");
+      return;
+    }
     setAdding(true);
     setError("");
     try {
+      const prepRes = await fetch("/api/drive/upload-prep");
+      const prep = await prepRes.json();
+      if (!prepRes.ok) {
+        throw new Error(prep.error || "Could not prepare Drive upload");
+      }
+      const driveFileId = await uploadFileToDrive(
+        picked,
+        prep.accessToken,
+        prep.folderId,
+      );
       const res = await fetch("/api/files", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url }),
+        body: JSON.stringify({ driveFileId }),
       });
       const json = await res.json();
-      if (!res.ok) throw new Error(json.error || "Could not add file");
-      setUrl("");
+      if (!res.ok) throw new Error(json.error || "Could not register file");
+      setPicked(null);
+      e.target.reset();
       await load();
     } catch (err) {
       setError(err.message);
@@ -107,12 +175,54 @@ export default function Dashboard({ user }) {
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || "Could not assign");
-      setAssignDraft((prev) => ({ ...prev, [fileId]: { email: "", role: "reader" } }));
+      setAssignDraft((prev) => ({
+        ...prev,
+        [fileId]: { email: "", role: "reader", pick: "" },
+      }));
       await load();
     } catch (err) {
       setError(err.message);
     } finally {
       setBusyId("");
+    }
+  }
+
+  async function deleteOwnedFile() {
+    if (!confirmDelete) return;
+    setDeleting(true);
+    setError("");
+    try {
+      const tokenRes = await fetch("/api/drive/token");
+      const tokenJson = await tokenRes.json();
+      if (!tokenRes.ok) {
+        throw new Error(tokenJson.error || "Could not get Drive access");
+      }
+      const driveRes = await fetch(
+        `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(confirmDelete.driveFileId)}?supportsAllDrives=true`,
+        {
+          method: "PATCH",
+          headers: {
+            Authorization: `Bearer ${tokenJson.accessToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ trashed: true }),
+        },
+      );
+      if (!driveRes.ok && driveRes.status !== 404) {
+        throw new Error("Could not delete the file from Google Drive.");
+      }
+
+      const res = await fetch(`/api/files/${confirmDelete.id}`, {
+        method: "DELETE",
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || "Could not delete file");
+      setConfirmDelete(null);
+      await load();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -195,26 +305,30 @@ export default function Dashboard({ user }) {
         ) : null}
 
         <section className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-          <h1 className="text-lg font-semibold">Add a file you own</h1>
+          <h1 className="text-lg font-semibold">Upload a file</h1>
           <p className="mt-1 text-sm text-zinc-500">
-            Paste a Restricted Drive / Docs link. On assign, Google will share it with
-            that person using <em>your</em> Drive permission.
+            The file is saved in <em>your</em> Google Drive, in the folder{" "}
+            <strong>Drive Access Demo</strong>. Assigning a colleague shares that Drive
+            file with them.
           </p>
           <form onSubmit={addFile} className="mt-4 flex flex-col gap-2 sm:flex-row">
             <input
-              type="url"
+              type="file"
               required
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-              placeholder="https://drive.google.com/file/d/..."
-              className="min-w-0 flex-1 rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-950"
+              disabled={adding}
+              onChange={(e) => setPicked(e.target.files?.[0] ?? null)}
+              className="min-w-0 flex-1 rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm file:mr-3 file:rounded-lg file:border-0 file:bg-zinc-100 file:px-3 file:py-1 file:text-sm dark:border-zinc-700 dark:bg-zinc-950 dark:file:bg-zinc-800"
             />
             <button
               type="submit"
-              disabled={adding}
+              disabled={adding || !picked}
               className="rounded-xl bg-zinc-900 px-4 py-2 text-sm font-semibold text-white hover:bg-zinc-800 disabled:opacity-60 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-white"
             >
-              {adding ? "Adding…" : "Add file"}
+              {adding
+                ? picked
+                  ? `Uploading ${picked.name}…`
+                  : "Uploading…"
+                : "Upload"}
             </button>
           </form>
         </section>
@@ -229,7 +343,17 @@ export default function Dashboard({ user }) {
             <p className="text-sm text-zinc-500">No files yet.</p>
           ) : (
             data.owned.map((file) => {
-              const draft = assignDraft[file.id] ?? { email: "", role: "reader" };
+              const draft = assignDraft[file.id] ?? {
+                email: "",
+                role: "reader",
+                pick: "",
+              };
+              const assigned = new Set(
+                (file.assignments ?? []).map((a) => a.assigneeEmail.toLowerCase()),
+              );
+              const pickable = users.filter(
+                (u) => !assigned.has(String(u.email).toLowerCase()),
+              );
               return (
                 <article
                   key={file.id}
@@ -247,6 +371,29 @@ export default function Dashboard({ user }) {
                         Open in Drive
                       </a>
                     </div>
+                    <button
+                      type="button"
+                      aria-label="Delete file"
+                      onClick={() => setConfirmDelete(file)}
+                      className="rounded-lg p-1.5 text-zinc-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40"
+                    >
+                      <svg
+                        viewBox="0 0 24 24"
+                        className="h-4 w-4"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <polyline points="3 6 5 6 21 6" />
+                        <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                        <path d="M10 11v6" />
+                        <path d="M14 11v6" />
+                        <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+                      </svg>
+                    </button>
                   </div>
 
                   <ul className="mt-3 space-y-1">
@@ -277,19 +424,44 @@ export default function Dashboard({ user }) {
                     )}
                   </ul>
 
-                  <div className="mt-3 flex flex-col gap-2 sm:flex-row">
-                    <input
-                      type="email"
-                      value={draft.email}
-                      onChange={(e) =>
+                  <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:flex-wrap">
+                    <select
+                      value={draft.pick ?? ""}
+                      onChange={(e) => {
+                        const pick = e.target.value;
                         setAssignDraft((prev) => ({
                           ...prev,
-                          [file.id]: { ...draft, email: e.target.value },
-                        }))
-                      }
-                      placeholder="colleague@steorasystems.com"
-                      className="min-w-0 flex-1 rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-950"
-                    />
+                          [file.id]: {
+                            ...draft,
+                            pick,
+                            email: pick === "+" || pick === "" ? "" : pick,
+                          },
+                        }));
+                      }}
+                      className="min-w-0 flex-1 rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-950"
+                    >
+                      <option value="">Select a user</option>
+                      {pickable.map((u) => (
+                        <option key={u.id} value={u.email}>
+                          {u.name ? `${u.name} (${u.email})` : u.email}
+                        </option>
+                      ))}
+                      <option value="+">+ Add email</option>
+                    </select>
+                    {draft.pick === "+" ? (
+                      <input
+                        type="email"
+                        value={draft.email}
+                        onChange={(e) =>
+                          setAssignDraft((prev) => ({
+                            ...prev,
+                            [file.id]: { ...draft, email: e.target.value },
+                          }))
+                        }
+                        placeholder="colleague@steorasystems.com"
+                        className="min-w-0 flex-1 rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-950"
+                      />
+                    ) : null}
                     <select
                       value={draft.role}
                       onChange={(e) =>
@@ -349,6 +521,45 @@ export default function Dashboard({ user }) {
           )}
         </section>
       </main>
+
+      {confirmDelete ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-file-title"
+            className="w-full max-w-sm rounded-2xl border border-zinc-200 bg-white p-5 shadow-xl dark:border-zinc-700 dark:bg-zinc-900"
+          >
+            <h2 id="delete-file-title" className="text-base font-semibold">
+              Delete this file?
+            </h2>
+            <p className="mt-2 text-sm text-zinc-500">
+              <span className="font-medium text-zinc-800 dark:text-zinc-200">
+                {confirmDelete.title || confirmDelete.driveFileId}
+              </span>{" "}
+              will get deleted from Drive.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                disabled={deleting}
+                onClick={() => setConfirmDelete(null)}
+                className="rounded-xl border border-zinc-200 px-4 py-2 text-sm font-medium hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={deleting}
+                onClick={deleteOwnedFile}
+                className="rounded-xl bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-500 disabled:opacity-60"
+              >
+                {deleting ? "Deleting…" : "Delete"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
